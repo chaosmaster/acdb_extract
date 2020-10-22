@@ -1,87 +1,90 @@
 #include <stdlib.h>
+#include <dlfcn.h>
 #include <stdio.h>
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <string.h>
-#include <limits.h>
 
 #include "acdb_data.h"
 
-#define TABLE_SIZE (SND_DEVICE_MAX * sizeof(int))
+typedef char* (*platform_get_snd_device_name_t)(int);
+typedef int (*platform_get_snd_device_index_t)(char*);
+typedef int (*platform_get_snd_device_acdb_id_t)(int);
 
 int main(int argc, char** argv) {
+	void *handle;
+	platform_get_snd_device_name_t platform_get_snd_device_name;
+	platform_get_snd_device_index_t platform_get_snd_device_index;
+	platform_get_snd_device_acdb_id_t platform_get_snd_device_acdb_id;
 
-	int *acdb_device_table;
-
-	int max_acdb_id = 1000;
-
-	struct stat stat_buf;
-
-	/* check args */
-	if (argc < 2) {
-		printf("%s: [audio hal path] [max_acdb_id]\n", argv[0]);
+	if (argc != 2) {
+		printf("%s: [audio hal path]\n", argv[0]);
 		exit(1);
 	}
 
-	/* get the max acdb_id allowed if any */
-	if (argc > 2) {
-		max_acdb_id = strtol(argv[2], NULL, 10);
+	handle = dlopen(argv[1], RTLD_LAZY);
+	if (!handle) {
+		fprintf(stderr, "%s\n", dlerror());
+		return 1;
 	}
 
-	/* open the audio hal file */
-	int fd = open(argv[1], O_RDONLY);
-	if (fd < 0) {
-		perror("open");
-		exit(1);
+	platform_get_snd_device_name = (platform_get_snd_device_name_t) dlsym(handle, "platform_get_snd_device_name");
+
+	if (!platform_get_snd_device_name)  {
+		fprintf(stderr, "%s\n", dlerror());
+		return 1;
 	}
 
-	/* get the file stats */
-	if (fstat(fd, &stat_buf) < 0) {
-		perror("stat");
-		exit(1);
+	platform_get_snd_device_index = (platform_get_snd_device_index_t) dlsym(handle, "platform_get_snd_device_index");
+
+	if (!platform_get_snd_device_index)  {
+		fprintf(stderr, "%s\n", dlerror());
+		return 1;
 	}
 
-	/* mmap the file to memory */
-	char * hal_file = mmap(0, stat_buf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	if (hal_file == MAP_FAILED) {
-		perror("mmap");
-		exit(1);
+	platform_get_snd_device_acdb_id = (platform_get_snd_device_acdb_id_t) dlsym(handle, "platform_get_snd_device_acdb_id");
+
+	if (!platform_get_snd_device_acdb_id)  {
+		fprintf(stderr, "%s\n", dlerror());
+		return 1;
 	}
 
-	/* pointers to beginning of table and end of file */
-	char * curr = hal_file;
-	char * end = hal_file + stat_buf.st_size - 1;
+	int dev, idx;
 
-	int i;
+	int named_indexes[SND_DEVICE_MAX] = {};
 
-	/* go through the whole file every SND_DEVICE_MAX*4 bytes */
-	while((curr+TABLE_SIZE) < end) {
-
-		acdb_device_table = (int*)curr;
-
-		/* verify that the first entry is -1 */
-		if (acdb_device_table[SND_DEVICE_NONE] != -1) {
-			goto next;
+	printf("    <acdb_ids>\n");
+	for (dev = 0, idx = 0; dev < SND_DEVICE_MAX; dev++) {
+		idx = platform_get_snd_device_index(faux_device_table[dev]);
+		if(idx >= 0){
+			named_indexes[dev] = idx;
+			printf("        <device name=\"%s\" acdb_id=\"%i\"/>\n", faux_device_table[dev], platform_get_snd_device_acdb_id(idx));
 		}
-
-		for (i = 1; i < SND_DEVICE_MAX; i++) {
-			//if ((acdb_device_table[i] < 0) || (acdb_device_table[i] > max_acdb_id)) goto next;
-			if (acdb_device_table[i] > max_acdb_id) goto next;
-		}
-
-		/* print the table */
-		printf("\t<acdb_ids>\n");
-		for (i = 1; i < SND_DEVICE_MAX; i++)
-			printf("\t\t<device name=\"%s\" acdb_id=\"%i\"/>\n", faux_device_table[i], acdb_device_table[i]);
-		printf("\t</acdb_ids>\n");
-
-next:
-		/*advance to the next byte in the file */
-		curr = curr + 1;
 	}
+	printf("    </acdb_ids>\n");
 
+	printf("\n");
+
+	printf("    <device_names>\n");
+	for (dev = 0, idx = 0; dev < SND_DEVICE_MAX; dev++) {
+		idx = platform_get_snd_device_index(faux_device_table[dev]);
+		if(idx >= 0) printf("        <device name=\"%s\" alias=\"%s\"/>\n", faux_device_table[dev], platform_get_snd_device_name(idx));
+	}
+	printf("    </device_names>\n");
+
+	printf("\n");
+
+	printf("    <unknown_devices>\n");
+	for (idx = 0; idx < 1000; idx++) {
+		char found = 0;
+		for(dev = 0; dev < SND_DEVICE_MAX; dev++){
+			if (named_indexes[dev] == idx) found = 1;
+		}
+		if (!found) {
+			char* name = platform_get_snd_device_name(idx);
+			if(name && name[0]) printf("        <device name=\"UNKNOWN\" index=\"%d\" alias=\"%s\" acdb_id=\"%d\"/>\n", idx, platform_get_snd_device_name(idx), platform_get_snd_device_acdb_id(idx));
+		}
+	}
+	printf("    </unknown_devices>\n");
+
+	dlclose(handle);
 	return 0;
 }
